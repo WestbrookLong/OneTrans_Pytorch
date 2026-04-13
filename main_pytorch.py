@@ -58,9 +58,10 @@ class CausalMaskAttention(nn.Module):
             vs.append(self._cal_kqv(x[2][:, i : i + 1, :], i, 2))
 
         if self.ns_len < x[0].size(1):
-            ks.append(self._cal_kqv(x[0][:, self.ns_len :, :], 0, 0))
-            qs.append(self._cal_kqv(x[1][:, self.ns_len :, :], 0, 1))
-            vs.append(self._cal_kqv(x[2][:, self.ns_len :, :], 0, 2))
+            shared_group_idx = self.ns_len
+            ks.append(self._cal_kqv(x[0][:, self.ns_len :, :], shared_group_idx, 0))
+            qs.append(self._cal_kqv(x[1][:, self.ns_len :, :], shared_group_idx, 1))
+            vs.append(self._cal_kqv(x[2][:, self.ns_len :, :], shared_group_idx, 2))
 
         return torch.cat(ks, dim=1), torch.cat(qs, dim=1), torch.cat(vs, dim=1)
 
