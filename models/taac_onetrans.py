@@ -25,6 +25,7 @@ class TAACOneTransClassifier(nn.Module):
         num_heads: int,
         ffn_hidden: int,
         multi_num: int,
+        mask_type: str = "origin",
     ) -> None:
         super().__init__()
         self.ns_len = ns_len
@@ -37,6 +38,7 @@ class TAACOneTransClassifier(nn.Module):
             num_heads=num_heads,
             ffn_units=(ffn_hidden, d_model),
             n=multi_num,
+            mask_type=mask_type,
         )
         total_tokens = ns_len + seq_len
         self.stack_blocks = nn.ModuleList(
@@ -48,6 +50,7 @@ class TAACOneTransClassifier(nn.Module):
                     ffn_units=(ffn_hidden, d_model),
                     n=multi_num,
                     pyramid_stack_len=target_len,
+                    mask_type=mask_type,
                 )
                 for target_len in range(total_tokens - 1, ns_len - 1, -1)
             ]

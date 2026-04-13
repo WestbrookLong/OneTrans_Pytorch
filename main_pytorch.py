@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 
+VALID_MASK_TYPES = {"origin", "hard_mask", "bimask_soft", "bimask_hard"}
+
 
 class FFNLayer(nn.Module):
     def __init__(self, input_dim: int, unit_1: int = 256, unit_2: int = 128) -> None:
@@ -16,16 +18,26 @@ class FFNLayer(nn.Module):
 
 
 class CausalMaskAttention(nn.Module):
-    def __init__(self, ns_len: int, d_model: int = 128, num_heads: int = 4, if_mask: bool = True) -> None:
+    def __init__(
+        self,
+        ns_len: int,
+        d_model: int = 128,
+        num_heads: int = 4,
+        if_mask: bool = True,
+        mask_type: str = "origin",
+    ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
+        if mask_type not in VALID_MASK_TYPES:
+            raise ValueError(f"Unsupported mask_type: {mask_type}")
 
         self.d_model = d_model
         self.num_heads = num_heads
         self.depth = d_model // num_heads
         self.ns_len = ns_len
         self.if_mask = if_mask
+        self.mask_type = mask_type
         self.dense = nn.Linear(d_model, d_model)
         self.kqv_list = nn.ModuleList(
             [nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(3)]) for _ in range(ns_len + 1)]
@@ -36,13 +48,26 @@ class CausalMaskAttention(nn.Module):
         x = x.view(batch_size, seq_len, self.num_heads, self.depth)
         return x.transpose(1, 2)
 
-    def create_causal_mask(self, query_len: int, key_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        # Preserve the original TensorFlow masking logic exactly, even though it is
-        # not a strict additive -inf causal mask.
+    def create_attention_mask(self, query_len: int, key_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         row_idx = torch.arange(query_len, device=device).unsqueeze(1)
         col_idx = torch.arange(key_len, device=device).unsqueeze(0)
-        mask = (col_idx - row_idx) <= (self.ns_len - 1)
-        return mask.to(dtype=dtype) + 1e-9
+        origin_allowed = (col_idx - row_idx) <= (self.ns_len - 1)
+        if self.mask_type == "origin":
+            return origin_allowed.to(dtype=dtype) + 1e-9
+        if self.mask_type == "hard_mask":
+            mask = torch.zeros(query_len, key_len, device=device, dtype=dtype)
+            return mask.masked_fill(~origin_allowed, torch.finfo(dtype).min)
+
+        ns_query_rows = row_idx < self.ns_len
+        strict_causal_allowed = col_idx <= row_idx
+        if self.mask_type == "bimask_soft":
+            mask = torch.zeros(query_len, key_len, device=device, dtype=dtype)
+            seq_allowed = (~ns_query_rows) & strict_causal_allowed
+            return mask + seq_allowed.to(dtype=dtype)
+
+        allowed = ns_query_rows | strict_causal_allowed
+        mask = torch.zeros(query_len, key_len, device=device, dtype=dtype)
+        return mask.masked_fill(~allowed, torch.finfo(dtype).min)
 
     def _cal_kqv(self, x: torch.Tensor, group_idx: int, proj_idx: int) -> torch.Tensor:
         return self.kqv_list[group_idx][proj_idx](x)
@@ -78,10 +103,10 @@ class CausalMaskAttention(nn.Module):
         scaled_attention_logits = matmul_qk / (self.depth ** 0.5)
 
         if self.if_mask:
-            causal_mask = self.create_causal_mask(
+            attention_mask = self.create_attention_mask(
                 seq_len_q, seq_len_k, device=scaled_attention_logits.device, dtype=scaled_attention_logits.dtype
             )
-            scaled_attention_logits = scaled_attention_logits + causal_mask.unsqueeze(0).unsqueeze(0)
+            scaled_attention_logits = scaled_attention_logits + attention_mask.unsqueeze(0).unsqueeze(0)
 
         attention_weights = torch.softmax(scaled_attention_logits, dim=-1)
         output = torch.matmul(attention_weights, v)
@@ -98,6 +123,7 @@ class OneTransBlock(nn.Module):
         num_heads: int = 4,
         ffn_units: tuple[int, int] = (256, 128),
         pyramid_stack_len: int | None = None,
+        mask_type: str = "origin",
     ) -> None:
         super().__init__()
         self.ns_len = ns_len
@@ -105,7 +131,12 @@ class OneTransBlock(nn.Module):
         self.pyramid_stack_len = pyramid_stack_len
         self.rms_0 = nn.LayerNorm(d_model)
         self.rms_1 = nn.LayerNorm(d_model)
-        self.cma = CausalMaskAttention(ns_len=ns_len, d_model=d_model, num_heads=num_heads)
+        self.cma = CausalMaskAttention(
+            ns_len=ns_len,
+            d_model=d_model,
+            num_heads=num_heads,
+            mask_type=mask_type,
+        )
         self.ffn_list = nn.ModuleList(
             [FFNLayer(input_dim=d_model, unit_1=ffn_units[0], unit_2=ffn_units[1]) for _ in range(ns_len + 1)]
         )
@@ -144,6 +175,7 @@ class MultiOneTransBlock(nn.Module):
         ffn_units: tuple[int, int] = (256, 128),
         n: int = 4,
         pyramid_stack_len: int | None = None,
+        mask_type: str = "origin",
     ) -> None:
         super().__init__()
         self.otb_list = nn.ModuleList(
@@ -154,6 +186,7 @@ class MultiOneTransBlock(nn.Module):
                     num_heads=num_heads,
                     ffn_units=ffn_units,
                     pyramid_stack_len=pyramid_stack_len,
+                    mask_type=mask_type,
                 )
                 for _ in range(n)
             ]
