@@ -16,9 +16,10 @@ python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --save-checkpoi
 
 ## 选择注意力 mask 类型
 
-默认 attention 使用 `origin`。  
+默认 attention 使用 `paper_causal`。  
 可选值为：
 
+- `paper_causal`
 - `origin`
 - `hard_mask`
 - `bimask_soft`
@@ -27,10 +28,38 @@ python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --save-checkpoi
 示例：
 
 ```bash
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type paper_causal
 python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type origin
 python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type hard_mask
 python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type bimask_soft
 python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type bimask_hard
+```
+
+## 控制金字塔压缩层数
+
+默认使用 `6` 层线性 schedule，并在大 token 长度配置下按 `32` 对齐。
+
+```bash
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --num-pyramid-layers 6 --pyramid-align 32
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --num-pyramid-layers 4 --pyramid-align 1
+```
+
+## 开启或关闭 `[SEP]` token
+
+默认插入一个可学习的 `[SEP]` token，位置在 sequence tokens 和 ns tokens 之间。
+
+```bash
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --no-sep-token
+```
+
+## 开启 activation checkpoint
+
+默认关闭 activation checkpoint。打开后，训练时会在 OneTrans block 内重算激活以换取更低显存占用。
+
+```bash
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --activation-checkpoint
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --activation-checkpoint --no-amp
 ```
 
 ## 开启/关闭混合精度
@@ -63,7 +92,7 @@ python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --no-amp
 ```bash
 python scripts/run_taac2026_sample.py --epochs 10 --batch-size 32 --resume best_model_20260413_172711.pt
 python scripts/run_taac2026_sample.py --epochs 10 --batch-size 32 --resume best_model_20260413_172711.pt --save-checkpoint
-python scripts/run_taac2026_sample.py --epochs 10 --batch-size 32 --resume D:\Users\WESTBROOK\PycharmProjects\OneTrans_Pytorch\outputs\taac2026_sample\best_model_20260413_172711.pt
+python scripts/run_taac2026_sample.py --epochs 10 --batch-size 32 --resume D:\Users\WESTBROOK\PycharmProjects\RecAlgo\OneTrans_Pytorch\outputs\taac2026_sample\best_model_20260413_172711.pt
 ```
 
 如果同时开启 `--save-checkpoint`，训练结束后会再保存一个新的时间戳 checkpoint，不会覆盖旧文件。
@@ -86,6 +115,8 @@ python scripts/run_taac2026_sample.py ^
   --num-heads 4 ^
   --ffn-hidden 256 ^
   --multi-num 4 ^
+  --num-pyramid-layers 6 ^
+  --pyramid-align 32 ^
   --lr 1e-3 ^
   --weight-decay 1e-4
 ```

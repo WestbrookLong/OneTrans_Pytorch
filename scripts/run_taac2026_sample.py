@@ -22,7 +22,7 @@ from utils.common import json_ready_args, set_seed, split_indices, take_rows
 from utils.metrics import accuracy_from_logits, multiclass_auc_from_logits
 from utils.taac_data import build_tensors, load_train_split
 
-MASK_TYPE_CHOICES = ("origin", "hard_mask", "bimask_soft", "bimask_hard")
+MASK_TYPE_CHOICES = ("paper_causal", "origin", "hard_mask", "bimask_soft", "bimask_hard")
 
 
 def parse_device_type(device: str) -> str:
@@ -73,15 +73,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--ffn-hidden", type=int, default=256)
-    parser.add_argument("--multi-num", type=int, default=4, help="How many OneTrans blocks to average in each stage.")
+    parser.add_argument("--multi-num", type=int, default=4, help="How many OneTrans blocks to stack in each stage.")
+    parser.add_argument("--num-pyramid-layers", type=int, default=6)
+    parser.add_argument("--pyramid-align", type=int, default=32)
     parser.add_argument(
         "--mask_type",
         "--mask-type",
         type=normalize_mask_type,
         choices=MASK_TYPE_CHOICES,
-        default="origin",
-        help="Attention mask mode: origin, hard_mask, bimask_soft, or bimask_hard.",
+        default="paper_causal",
+        help="Attention mask mode: paper_causal, origin, hard_mask, bimask_soft, or bimask_hard.",
     )
+    parser.add_argument("--sep-token", dest="use_sep_token", action="store_true", help="Insert a learnable SEP token between seq and ns tokens.")
+    parser.add_argument("--no-sep-token", dest="use_sep_token", action="store_false", help="Disable the learnable SEP token.")
+    parser.set_defaults(use_sep_token=True)
+    parser.add_argument(
+        "--activation-checkpoint",
+        dest="use_checkpoint",
+        action="store_true",
+        help="Enable activation checkpointing inside OneTrans blocks during training.",
+    )
+    parser.add_argument(
+        "--no-activation-checkpoint",
+        dest="use_checkpoint",
+        action="store_false",
+        help="Disable activation checkpointing inside OneTrans blocks.",
+    )
+    parser.set_defaults(use_checkpoint=False)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -203,6 +221,10 @@ def build_model(args: argparse.Namespace, non_seq_x: torch.Tensor, seq_x: torch.
         ffn_hidden=args.ffn_hidden,
         multi_num=args.multi_num,
         mask_type=args.mask_type,
+        num_pyramid_layers=args.num_pyramid_layers,
+        pyramid_align=args.pyramid_align,
+        use_sep_token=args.use_sep_token,
+        use_checkpoint=args.use_checkpoint,
     ).to(args.device)
 
 
@@ -292,7 +314,9 @@ def main() -> None:
     print(f"[run] non_seq={tuple(non_seq_x.shape)} seq={tuple(seq_x.shape)} classes={int(labels.max().item()) + 1}")
     print(
         f"[run] amp={use_amp} amp_dtype={args.amp_dtype} "
-        f"grad_scaler={scaler.is_enabled()} device_type={device_type} mask_type={args.mask_type}"
+        f"grad_scaler={scaler.is_enabled()} device_type={device_type} mask_type={args.mask_type} "
+        f"pyramid_layers={args.num_pyramid_layers} pyramid_align={args.pyramid_align} "
+        f"sep_token={args.use_sep_token} activation_checkpoint={args.use_checkpoint}"
     )
 
     best_val_auc = float("-inf")

@@ -13,6 +13,29 @@ if str(PROJECT_ROOT) not in sys.path:
 from main_pytorch import MultiOneTransBlock
 
 
+def linear_pyramid_schedule(total_tokens: int, ns_len: int, num_layers: int, align_to: int = 32) -> list[int]:
+    if num_layers <= 0:
+        raise ValueError("num_layers must be positive")
+    if total_tokens < ns_len:
+        raise ValueError("total_tokens must be greater than or equal to ns_len")
+    if align_to <= 0:
+        raise ValueError("align_to must be positive")
+
+    if num_layers == 1:
+        return [ns_len]
+
+    schedule = [total_tokens]
+    for layer_idx in range(1, num_layers - 1):
+        raw = total_tokens + (ns_len - total_tokens) * layer_idx / (num_layers - 1)
+        target_len = int(round(raw))
+        if align_to > 1 and total_tokens > align_to:
+            target_len = int(round(target_len / align_to) * align_to)
+        target_len = max(ns_len, min(schedule[-1], target_len))
+        schedule.append(target_len)
+    schedule.append(ns_len)
+    return schedule
+
+
 class TAACOneTransClassifier(nn.Module):
     def __init__(
         self,
@@ -25,13 +48,20 @@ class TAACOneTransClassifier(nn.Module):
         num_heads: int,
         ffn_hidden: int,
         multi_num: int,
-        mask_type: str = "origin",
+        mask_type: str = "paper_causal",
+        num_pyramid_layers: int = 6,
+        pyramid_align: int = 32,
+        use_sep_token: bool = True,
+        use_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         self.ns_len = ns_len
         self.seq_len = seq_len
+        self.use_sep_token = use_sep_token
         self.non_seq_tokenizer = nn.Linear(non_seq_dim, ns_len * d_model)
         self.seq_tokenizer = nn.Linear(seq_feature_dim, d_model)
+        if use_sep_token:
+            self.sep_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.base_block = MultiOneTransBlock(
             ns_len=ns_len,
             d_model=d_model,
@@ -39,8 +69,15 @@ class TAACOneTransClassifier(nn.Module):
             ffn_units=(ffn_hidden, d_model),
             n=multi_num,
             mask_type=mask_type,
+            use_checkpoint=use_checkpoint,
         )
-        total_tokens = ns_len + seq_len
+        total_tokens = ns_len + seq_len + (1 if use_sep_token else 0)
+        schedule = linear_pyramid_schedule(
+            total_tokens=total_tokens,
+            ns_len=ns_len,
+            num_layers=num_pyramid_layers,
+            align_to=pyramid_align,
+        )
         self.stack_blocks = nn.ModuleList(
             [
                 MultiOneTransBlock(
@@ -51,8 +88,9 @@ class TAACOneTransClassifier(nn.Module):
                     n=multi_num,
                     pyramid_stack_len=target_len,
                     mask_type=mask_type,
+                    use_checkpoint=use_checkpoint,
                 )
-                for target_len in range(total_tokens - 1, ns_len - 1, -1)
+                for target_len in schedule
             ]
         )
         self.head = nn.Sequential(
@@ -66,7 +104,11 @@ class TAACOneTransClassifier(nn.Module):
         batch_size = non_seq_x.size(0)
         ns_tokens = self.non_seq_tokenizer(non_seq_x).view(batch_size, self.ns_len, -1)
         seq_tokens = self.seq_tokenizer(seq_x)
-        x = torch.cat([ns_tokens, seq_tokens], dim=1)
+        if self.use_sep_token:
+            sep_token = self.sep_token.expand(batch_size, -1, -1)
+            x = torch.cat([seq_tokens, sep_token, ns_tokens], dim=1)
+        else:
+            x = torch.cat([seq_tokens, ns_tokens], dim=1)
         x = self.base_block(x)
         for block in self.stack_blocks:
             x = block(x)

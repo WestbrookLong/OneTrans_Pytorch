@@ -45,15 +45,19 @@ Do not move task-specific training logic back into `utils/` unless it is clearly
 - The project uses a OneTrans-style backbone with:
   - non-sequential features mapped into `ns_len` pseudo tokens
   - sequential features mapped into `seq_len` sequence tokens
-  - token order `[ns_tokens, seq_tokens]`
+  - token order `[seq_tokens, ns_tokens]`
 - In attention and FFN:
-  - the first `ns_len` tokens use token-specific parameter groups
-  - the remaining sequence tokens share the extra group at index `ns_len`
+  - the last `ns_len` tokens use token-specific parameter groups
+  - the leading sequence tokens share the extra group at index `ns_len`
 - Attention mask modes:
+  - `paper_causal`: paper-aligned causal mask for the `[seq_tokens, ns_tokens]` layout
   - `origin`: original soft bias mask
   - `hard_mask`: original hard additive mask
   - `bimask_soft`: ns-token rows unmasked, seq-token rows use soft causal bias
   - `bimask_hard`: ns-token rows unmasked, seq-token rows use hard causal mask
+
+The default downstream wrapper also inserts a learnable `[SEP]` token between sequence tokens and ns tokens.
+Backbone attention runs through PyTorch SDPA, and activation checkpointing can be enabled during training.
 
 When changing attention semantics, keep `main_pytorch.py` and any model wrapper usage aligned.
 
@@ -66,6 +70,9 @@ Expected supported behaviors:
 - train from Hugging Face dataset or local parquet
 - AMP support with CUDA autocast and optional GradScaler
 - configurable attention mask via `--mask_type`
+- configurable linear pyramid depth via `--num-pyramid-layers` and `--pyramid-align`
+- optional `[SEP]` token control via `--sep-token` and `--no-sep-token`
+- optional activation checkpointing via `--activation-checkpoint`
 - checkpoint save with timestamped filenames
 - checkpoint resume via `--resume`
 - save metadata to `run_metadata.json`

@@ -29,10 +29,10 @@ The architectural core comes from the TensorFlow demo linked above. The followin
 
 - non-sequential features are converted into `ns_len` pseudo tokens
 - sequential features are converted into `seq_len` sequence tokens
-- token order is `[ns_tokens, seq_tokens]`
-- the first `ns_len` tokens use token-specific parameter groups
-- the remaining sequence tokens share one extra parameter group
-- pyramid-style compression progressively reduces token length until only the `ns_tokens` remain
+- token order is aligned to `[seq_tokens, ns_tokens]`
+- the last `ns_len` tokens use token-specific parameter groups
+- the leading sequence tokens share one extra parameter group
+- pyramid-style compression uses a linear schedule down to `ns_len`
 
 The PyTorch port in this repository preserves those high-level ideas, but the surrounding engineering has been extended substantially.
 
@@ -101,12 +101,13 @@ At a high level, the model flow is:
 
 1. Map non-sequential features into `ns_len` pseudo tokens.
 2. Map sequential features into `seq_len` sequence tokens.
-3. Concatenate them into one token sequence:
-   `[ns_tokens, seq_tokens]`
-4. Run a base `MultiOneTransBlock`.
-5. Run a pyramid stack that shortens the query length step by step.
-6. Stop when only `ns_len` tokens remain.
-7. Pool the remaining `ns_tokens` for downstream prediction.
+3. Insert an optional learnable `[SEP]` token between the two token groups.
+4. Concatenate them into one token sequence:
+   `[seq_tokens, sep_token, ns_tokens]` when `use_sep_token=True`, otherwise `[seq_tokens, ns_tokens]`
+5. Run a base `MultiOneTransBlock`.
+6. Run a pyramid stack that shortens the tail query length step by step.
+7. Stop when only `ns_len` tokens remain.
+8. Pool the remaining `ns_tokens` for downstream prediction.
 
 ### Input Shapes
 
@@ -128,34 +129,41 @@ OneTrans is not using a single shared Q/K/V projection for every token.
 
 Instead:
 
-- the first `ns_len` tokens each use their own projection group
-- all remaining sequence tokens share one extra projection group
+- the last `ns_len` tokens each use their own projection group
+- all leading sequence-side tokens share one extra projection group
 
 This same pattern is also used by the FFN inside `OneTransBlock`:
 
-- the first `ns_len` tokens each use their own FFN
-- the remaining sequence tokens share one extra FFN
+- the last `ns_len` tokens each use their own FFN
+- the leading sequence-side tokens share one extra FFN
 
 This token-type-aware parameterization is one of the defining features of the implementation.
+
+### System Optimizations
+
+The backbone uses `torch.nn.functional.scaled_dot_product_attention` for the attention path.
+This keeps the paper-aligned additive mask behavior while letting PyTorch dispatch to optimized SDPA kernels when available.
+
+Training can also enable activation checkpointing inside `OneTransBlock` through the CLI so block activations are recomputed during backward instead of kept in memory.
 
 ### Pyramid Compression
 
 After the base block, later blocks do not always use the full token list as query.
 
-Instead, the model shortens the query length step by step:
+Instead, the model shortens the tail query length step by step using a linear schedule:
 
 - full length
-- full length minus 1
-- full length minus 2
-- ...
+- intermediate linearly spaced lengths
 - until only `ns_len` tokens remain
 
-The effect is that sequence information is gradually absorbed into the prefix `ns_tokens`, which are then used as the final summary representation.
+The effect is that sequence information is gradually absorbed into the tail `ns_tokens`, which are then used as the final summary representation.
 
 ## Attention Mask Modes
 
 The backbone currently supports multiple attention mask modes through `mask_type`:
 
+- `paper_causal`
+  Paper-aligned causal mask for the `[seq_tokens, ns_tokens]` layout.
 - `origin`
   Original soft bias mask behavior from the inherited implementation.
 - `hard_mask`
@@ -179,6 +187,8 @@ The training script supports:
 - local parquet loading
 - automatic schema handling
 - mixed precision training on CUDA
+- SDPA-based attention in the backbone
+- optional activation checkpointing
 - checkpoint save with timestamp-based filenames
 - checkpoint resume with optimizer and scaler state restoration
 
@@ -231,7 +241,13 @@ python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --save-checkpoi
 ### Training with a specific mask mode
 
 ```bash
-python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type bimask_hard
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --mask_type paper_causal
+```
+
+### Training with activation checkpointing
+
+```bash
+python scripts/run_taac2026_sample.py --epochs 5 --batch-size 32 --activation-checkpoint
 ```
 
 ### Resume training
